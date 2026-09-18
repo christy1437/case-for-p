@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>概率沙子 · 连续型</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 40px;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+                 "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: #f4f5f7; color: #222;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 20px; text-align: center; margin: 0 0 6px; font-weight: 700; letter-spacing: .5px; }
+  .sub { text-align: center; color: #777; font-size: 13px; margin-bottom: 18px; }
+  .panel {
+    background: #fff; border-radius: 14px; padding: 14px 18px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .panel label { font-size: 13px; color: #555; white-space: nowrap; }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    flex: 1; min-width: 200px; height: 6px; border-radius: 3px;
+    background: #e6e6e6; outline: none; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%;
+    background: #D9A404; cursor: pointer; border: 3px solid #fff;
+    box-shadow: 0 1px 5px rgba(0,0,0,.3);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #D9A404; cursor: pointer; border: 3px solid #fff;
+    box-shadow: 0 1px 5px rgba(0,0,0,.3);
+  }
+  .readout {
+    font-size: 14px; color: #444; font-variant-numeric: tabular-nums;
+    white-space: nowrap; line-height: 1.6;
+  }
+  .readout b { color: #D9A404; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+  .cell {
+    background: #fff; border-radius: 14px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    overflow: hidden;
+  }
+  canvas { display: block; width: 100%; height: 400px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>概率沙子 · 连续型</h1>
+  <div class="sub">标准正态分布　｜　沙层厚度 = 密度　｜　从左扫到 x 收集的沙量 = F(x)</div>
+
+  <div class="panel">
+    <label for="slider">拖动扫描位置 x₀ →</label>
+    <input id="slider" type="range" min="0" max="1000" value="600">
+    <span class="readout" id="readout"></span>
+  </div>
+
+  <div class="grid">
+    <div class="cell"><canvas id="c1"></canvas></div>
+    <div class="cell"><canvas id="c2"></canvas></div>
+  </div>
+</div>
+
+<script>
+(function () {
+'use strict';
+
+/* ====== 数学工具 ====== */
+function erf(x) {
+  const s = x < 0 ? -1 : 1;
+  x = Math.abs(x);
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741,
+        a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const t = 1 / (1 + p * x);
+  const y = 1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return s * y;
+}
+function normcdf(x) { return 0.5 * (1 + erf(x / Math.SQRT2)); }
+function normpdf(x) { return Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI); }
+
+const PAD  = { l: 56, r: 22, t: 40, b: 44 };
+const GOLD = '#D9A404';
+const DARK = '#2C7FB8';
+const RED  = '#D64545';
+const FONT = '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif';
+
+const CONT     = { xmin: -4.2, xmax: 4.2, ymin: 0, ymax: 0.46 }; // PDF 纵轴
+const CONT_CDF = { xmin: -4.2, xmax: 4.2, ymin: 0, ymax: 1.0  }; // CDF 纵轴
+
+/* 预生成密度曲线下的沙粒 */
+const contSand = [];
+{
+  const N = 8000;
+  let guard = 0;
+  while (contSand.length < N && guard < N * 30) {
+    guard++;
+    const x = -4.2 + Math.random() * 8.4;
+    const y = Math.random() * CONT.ymax;
+    if (y < normpdf(x)) {
+      contSand.push({
+        u: (x - CONT.xmin) / (CONT.xmax - CONT.xmin),
+        v: y / CONT.ymax,
+        x: x
+      });
+    }
+  }
+}
+
+const canvases = ['c1', 'c2'].map(id => document.getElementById(id));
+
+function prep(canvas) {
+  const dpr  = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const W = Math.max(1, Math.round(rect.width));
+  const H = Math.max(1, Math.round(rect.height));
+  const bw = Math.round(W * dpr), bh = Math.round(H * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw; canvas.height = bh;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  return { ctx: ctx, W: W, H: H };
+}
+
+function mapper(W, H, dom) {
+  const pw = W - PAD.l - PAD.r;
+  const ph = H - PAD.t - PAD.b;
+  const sx = pw / (dom.xmax - dom.xmin);
+  const sy = ph / (dom.ymax - dom.ymin);
+  return {
+    pw: pw, ph: ph,
+    X: x => PAD.l + (x - dom.xmin) * sx,
+    Y: y => PAD.t + ph - (y - dom.ymin) * sy,
+    U: u => PAD.l + u * pw,
+    V: v => PAD.t + ph - v * ph
+  };
+}
+
+function axes(ctx, W, H, m, o) {
+  const L = PAD.l, R = W - PAD.r, T = PAD.t, B = H - PAD.b;
+
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#f0f0f0';
+  for (const v of o.yticks) {
+    const y = m.Y(v);
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(R, y); ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#cfcfcf';
+  ctx.beginPath();
+  ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B);
+  ctx.stroke();
+
+  ctx.fillStyle = '#9a9a9a';
+  ctx.font = '11px ' + FONT;
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (const v of o.yticks) ctx.fillText(o.yfmt(v), L - 7, m.Y(v));
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (const v of o.xticks) ctx.fillText(o.xfmt(v), m.X(v), B + 7);
+
+  ctx.fillStyle = '#333';
+  ctx.font = '600 13px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText(o.title, L - 4, 10);
+
+  if (o.xlabel) {
+    ctx.fillStyle = '#9a9a9a';
+    ctx.font = '11px ' + FONT;
+    ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+    ctx.fillText(o.xlabel, R, H - 4);
+  }
+  if (o.ylabel) {
+    ctx.save();
+    ctx.translate(14, (T + B) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = '#9a9a9a';
+    ctx.font = '11px ' + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(o.ylabel, 0, 0);
+    ctx.restore();
+  }
+}
+
+/* ① 密度曲线上的沙粒 */
+function renderPDF(x0) {
+  const { ctx, W, H } = prep(canvases[0]);
+  const m = mapper(W, H, CONT);
+
+  axes(ctx, W, H, m, {
+    title: '① 概率密度：沙层越厚，概率越集中',
+    ylabel: '密度 f(x)', xlabel: 'x',
+    yticks: [0, 0.1, 0.2, 0.3, 0.4],
+    xticks: [-4, -3, -2, -1, 0, 1, 2, 3, 4],
+    yfmt: v => v.toFixed(1),
+    xfmt: v => String(v)
+  });
+
+  const size = 2.2;
+  for (let i = 0; i < contSand.length; i++) {
+    const s = contSand[i];
+    const px = m.U(s.u), py = m.V(s.v);
+    const lit = s.x <= x0;
+    ctx.fillStyle = lit ? 'rgba(217,164,4,0.52)' : 'rgba(198,198,198,0.34)';
+    ctx.fillRect(px - size / 2, py - size / 2, size, size);
+  }
+
+  /* 密度曲线 */
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  for (let i = 0; i <= 400; i++) {
+    const x = CONT.xmin + (CONT.xmax - CONT.xmin) * i / 400;
+    const y = normpdf(x);
+    if (i === 0) ctx.moveTo(m.X(x), m.Y(y));
+    else         ctx.lineTo(m.X(x), m.Y(y));
+  }
+  ctx.stroke();
+
+  /* 扫描线 */
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = RED;
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(m.X(x0), m.Y(0));
+  ctx.lineTo(m.X(x0), H - PAD.b);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const Fv = normcdf(x0);
+  ctx.font = '600 12px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  let lx = m.X(x0) + 8;
+  if (lx > W - PAD.r - 170) { ctx.textAlign = 'right'; lx = m.X(x0) - 8; }
+  ctx.fillStyle = RED;
+  ctx.fillText('左侧沙量 = P(X ≤ ' + x0.toFixed(2) + ') = ' + Fv.toFixed(3),
+               lx, m.Y(0.40));
+}
+
+/* ② 连续型分布函数：平滑曲线 */
+function renderContCDF(x0) {
+  const { ctx, W, H } = prep(canvases[1]);
+  const m = mapper(W, H, CONT_CDF);
+
+  axes(ctx, W, H, m, {
+    title: '② 分布函数 F(x) = P(X ≤ x)　（连续型：平滑无跳跃）',
+    ylabel: 'F(x)', xlabel: 'x',
+    yticks: [0, 0.25, 0.50, 0.75, 1.00],
+    xticks: [-4, -3, -2, -1, 0, 1, 2, 3, 4],
+    yfmt: v => v.toFixed(2),
+    xfmt: v => String(v)
+  });
+
+  /* CDF 曲线 */
+  ctx.strokeStyle = DARK;
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  for (let i = 0; i <= 400; i++) {
+    const x = CONT_CDF.xmin + (CONT_CDF.xmax - CONT_CDF.xmin) * i / 400;
+    const y = normcdf(x);
+    if (i === 0) ctx.moveTo(m.X(x), m.Y(y));
+    else         ctx.lineTo(m.X(x), m.Y(y));
+  }
+  ctx.stroke();
+
+  const Fv = normcdf(x0);
+
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = RED;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(m.X(x0), m.Y(0));
+  ctx.lineTo(m.X(x0), m.Y(Fv));
+  ctx.lineTo(m.X(CONT_CDF.xmin), m.Y(Fv));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = RED;
+  ctx.beginPath();
+  ctx.arc(m.X(x0), m.Y(Fv), 4.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.font = '600 12px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  let lx = m.X(x0) + 8;
+  if (lx > W - PAD.r - 120) { ctx.textAlign = 'right'; lx = m.X(x0) - 8; }
+  let ly = m.Y(Fv) - 18;
+  if (ly < PAD.t + 8) ly = PAD.t + 8;
+  ctx.fillStyle = RED;
+  ctx.fillText('F(' + x0.toFixed(2) + ') = ' + Fv.toFixed(3), lx, ly);
+
+  /* 教学提示 */
+  ctx.fillStyle = '#8A6D00';
+  ctx.font = '11px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('曲线平滑上升，看不到跳跃：P(X = x) = 0', PAD.l + 6, PAD.t + 4);
+}
+
+/* 主渲染 */
+const slider  = document.getElementById('slider');
+const readout = document.getElementById('readout');
+
+function render() {
+  const t   = slider.value / 1000;
+  const x0c = CONT.xmin + t * (CONT.xmax - CONT.xmin);
+
+  renderPDF(x0c);
+  renderContCDF(x0c);
+
+  readout.innerHTML =
+    'x₀ = <b>' + x0c.toFixed(2) + '</b>　｜　F(x₀) = P(X ≤ x₀) = <b>' + normcdf(x0c).toFixed(3) + '</b>';
+}
+
+let pending = false;
+function schedule() {
+  if (pending) return;
+  pending = true;
+  requestAnimationFrame(function () { pending = false; render(); });
+}
+
+slider.addEventListener('input', schedule);
+window.addEventListener('resize', schedule);
+
+render();
+
+})();
+</script>
+</body>
+</html>
