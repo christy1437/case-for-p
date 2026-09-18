@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>概率沙子 · 离散型</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 40px;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC",
+                 "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: #f4f5f7; color: #222;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 20px; text-align: center; margin: 0 0 6px; font-weight: 700; letter-spacing: .5px; }
+  .sub { text-align: center; color: #777; font-size: 13px; margin-bottom: 18px; }
+  .panel {
+    background: #fff; border-radius: 14px; padding: 14px 18px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  .panel label { font-size: 13px; color: #555; white-space: nowrap; }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    flex: 1; min-width: 200px; height: 6px; border-radius: 3px;
+    background: #e6e6e6; outline: none; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%;
+    background: #D9A404; cursor: pointer; border: 3px solid #fff;
+    box-shadow: 0 1px 5px rgba(0,0,0,.3);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #D9A404; cursor: pointer; border: 3px solid #fff;
+    box-shadow: 0 1px 5px rgba(0,0,0,.3);
+  }
+  .readout {
+    font-size: 14px; color: #444; font-variant-numeric: tabular-nums;
+    white-space: nowrap; line-height: 1.6;
+  }
+  .readout b { color: #D9A404; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+  .cell {
+    background: #fff; border-radius: 14px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    overflow: hidden;
+  }
+  canvas { display: block; width: 100%; height: 400px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>概率沙子 · 离散型</h1>
+  <div class="sub">两枚骰子点数之和　｜　沙堆体积 = 概率　｜　从左扫到 x 收集的沙量 = F(x)</div>
+
+  <div class="panel">
+    <label for="slider">拖动扫描位置 x₀ →</label>
+    <input id="slider" type="range" min="0" max="1000" value="600">
+    <span class="readout" id="readout"></span>
+  </div>
+
+  <div class="grid">
+    <div class="cell"><canvas id="c1"></canvas></div>
+    <div class="cell"><canvas id="c2"></canvas></div>
+  </div>
+</div>
+
+<script>
+(function () {
+'use strict';
+
+const PAD  = { l: 56, r: 22, t: 40, b: 44 };
+const GOLD = '#D9A404';
+const DARK = '#2C7FB8';
+const RED  = '#D64545';
+const FONT = '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif';
+
+const DISC     = { xmin: 1.5,  xmax: 12.5, ymin: 0, ymax: 0.20 }; // PMF 纵轴
+const DISC_CDF = { xmin: 1.5,  xmax: 12.5, ymin: 0, ymax: 1.0  }; // CDF 纵轴
+
+const KS  = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+const CNT = [1, 2, 3, 4, 5, 6, 5, 4,  3,  2,  1];
+const PK  = CNT.map(c => c / 36);
+const FK  = [];
+{ let acc = 0; for (const p of PK) { acc += p; FK.push(acc); } }
+
+/* 预生成沙粒 */
+const discSand = [];
+for (let i = 0; i < KS.length; i++) {
+  const k = KS[i], p = PK[i];
+  const n = Math.round(p * 2400) + 16;
+  for (let j = 0; j < n; j++) {
+    const y    = Math.random() * p;
+    const xoff = (Math.random() - 0.5) * 0.5;
+    discSand.push({
+      k: k,
+      u: (k + xoff - DISC.xmin) / (DISC.xmax - DISC.xmin),
+      v: y / DISC.ymax
+    });
+  }
+}
+
+const canvases = ['c1', 'c2'].map(id => document.getElementById(id));
+
+function prep(canvas) {
+  const dpr  = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const W = Math.max(1, Math.round(rect.width));
+  const H = Math.max(1, Math.round(rect.height));
+  const bw = Math.round(W * dpr), bh = Math.round(H * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw; canvas.height = bh;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  return { ctx: ctx, W: W, H: H };
+}
+
+function mapper(W, H, dom) {
+  const pw = W - PAD.l - PAD.r;
+  const ph = H - PAD.t - PAD.b;
+  const sx = pw / (dom.xmax - dom.xmin);
+  const sy = ph / (dom.ymax - dom.ymin);
+  return {
+    pw: pw, ph: ph,
+    X: x => PAD.l + (x - dom.xmin) * sx,
+    Y: y => PAD.t + ph - (y - dom.ymin) * sy,
+    U: u => PAD.l + u * pw,
+    V: v => PAD.t + ph - v * ph
+  };
+}
+
+function axes(ctx, W, H, m, o) {
+  const L = PAD.l, R = W - PAD.r, T = PAD.t, B = H - PAD.b;
+
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#f0f0f0';
+  for (const v of o.yticks) {
+    const y = m.Y(v);
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(R, y); ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#cfcfcf';
+  ctx.beginPath();
+  ctx.moveTo(L, T); ctx.lineTo(L, B); ctx.lineTo(R, B);
+  ctx.stroke();
+
+  ctx.fillStyle = '#9a9a9a';
+  ctx.font = '11px ' + FONT;
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (const v of o.yticks) ctx.fillText(o.yfmt(v), L - 7, m.Y(v));
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (const v of o.xticks) ctx.fillText(o.xfmt(v), m.X(v), B + 7);
+
+  ctx.fillStyle = '#333';
+  ctx.font = '600 13px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText(o.title, L - 4, 10);
+
+  if (o.xlabel) {
+    ctx.fillStyle = '#9a9a9a';
+    ctx.font = '11px ' + FONT;
+    ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+    ctx.fillText(o.xlabel, R, H - 4);
+  }
+  if (o.ylabel) {
+    ctx.save();
+    ctx.translate(14, (T + B) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = '#9a9a9a';
+    ctx.font = '11px ' + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(o.ylabel, 0, 0);
+    ctx.restore();
+  }
+}
+
+/* ① 概率质量：沙堆 */
+function renderPMF(x0) {
+  const { ctx, W, H } = prep(canvases[0]);
+  const m = mapper(W, H, DISC);
+
+  axes(ctx, W, H, m, {
+    title: '① 概率质量：沙堆越高，概率越大',
+    ylabel: '概率 P(X=k)', xlabel: 'k',
+    yticks: [0, 0.05, 0.10, 0.15, 0.20],
+    xticks: KS,
+    yfmt: v => v.toFixed(2),
+    xfmt: v => String(v)
+  });
+
+  const size = 2.2;
+  for (let i = 0; i < discSand.length; i++) {
+    const s = discSand[i];
+    const px = m.U(s.u), py = m.V(s.v);
+    const lit = s.k <= x0 + 1e-9;
+    ctx.fillStyle = lit ? 'rgba(217,164,4,0.62)' : 'rgba(198,198,198,0.42)';
+    ctx.fillRect(px - size / 2, py - size / 2, size, size);
+  }
+
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = 'rgba(214,69,69,0.85)';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(m.X(x0), PAD.t);
+  ctx.lineTo(m.X(x0), H - PAD.b);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/* ② 分布函数：水平线段断开 + 跳跃点实心圆 */
+function renderDiscCDF(x0) {
+  const { ctx, W, H } = prep(canvases[1]);
+  const m = mapper(W, H, DISC_CDF);
+
+  axes(ctx, W, H, m, {
+    title: '② 分布函数 F(x) = P(X ≤ x)　（阶梯，断点处无竖线）',
+    ylabel: 'F(x)', xlabel: 'x',
+    yticks: [0, 0.25, 0.50, 0.75, 1.00],
+    xticks: KS,
+    yfmt: v => v.toFixed(2),
+    xfmt: v => String(v)
+  });
+
+  /* === 只画水平线段，不画竖直连接线 === */
+  ctx.strokeStyle = DARK;
+  ctx.lineWidth = 2.4;
+  ctx.lineCap = 'butt';
+
+  ctx.beginPath();
+  /* 最左边一段：xmin → 2，高度 0 */
+  ctx.moveTo(m.X(DISC_CDF.xmin), m.Y(0));
+  ctx.lineTo(m.X(KS[0]),         m.Y(0));
+
+  /* 每个可能取值 k 对应一段水平线：k → k+1，高度 F(k) */
+  for (let i = 0; i < KS.length; i++) {
+    const k  = KS[i];
+    const xr = (i < KS.length - 1) ? KS[i + 1] : DISC_CDF.xmax;
+    const y  = m.Y(FK[i]);
+    ctx.moveTo(m.X(k),  y);
+    ctx.lineTo(m.X(xr), y);
+  }
+  ctx.stroke();
+
+  /* === 每个跳跃点画实心圆点，标记 F(k) 的值（右连续） === */
+  for (let i = 0; i < KS.length; i++) {
+    const cx = m.X(KS[i]);
+    const cy = m.Y(FK[i]);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(cx, cy, 5.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = RED;
+    ctx.beginPath(); ctx.arc(cx, cy, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  /* 当前 x0 处的 F 值 */
+  let Fv = 0;
+  for (let i = 0; i < KS.length; i++) if (KS[i] <= x0 + 1e-9) Fv = FK[i];
+
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = RED;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(m.X(x0), m.Y(0));
+  ctx.lineTo(m.X(x0), m.Y(Fv));
+  ctx.lineTo(m.X(DISC_CDF.xmin), m.Y(Fv));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = RED;
+  ctx.beginPath();
+  ctx.arc(m.X(x0), m.Y(Fv), 4.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.font = '600 12px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  let lx = m.X(x0) + 8;
+  if (lx > W - PAD.r - 150) { ctx.textAlign = 'right'; lx = m.X(x0) - 8; }
+  let ly = m.Y(Fv) - 18;
+  if (ly < PAD.t + 8) ly = PAD.t + 8;
+  ctx.fillStyle = RED;
+  ctx.fillText('F(' + x0.toFixed(2) + ') = ' + Fv.toFixed(3), lx, ly);
+
+  ctx.fillStyle = '#8A6D00';
+  ctx.font = '11px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText('每段台阶在 k 处断开：跳跃高度 = P(X = k)', PAD.l + 6, PAD.t + 4);
+}
+
+/* 主渲染 */
+const slider  = document.getElementById('slider');
+const readout = document.getElementById('readout');
+
+function render() {
+  const t   = slider.value / 1000;
+  const x0d = DISC.xmin + t * (DISC.xmax - DISC.xmin);
+
+  renderPMF(x0d);
+  renderDiscCDF(x0d);
+
+  let Fd = 0;
+  for (let i = 0; i < KS.length; i++) if (KS[i] <= x0d + 1e-9) Fd = FK[i];
+
+  readout.innerHTML =
+    'x₀ = <b>' + x0d.toFixed(2) + '</b>　｜　F(x₀) = P(X ≤ x₀) = <b>' + Fd.toFixed(3) + '</b>';
+}
+
+let pending = false;
+function schedule() {
+  if (pending) return;
+  pending = true;
+  requestAnimationFrame(function () { pending = false; render(); });
+}
+
+slider.addEventListener('input', schedule);
+window.addEventListener('resize', schedule);
+
+render();
+
+})();
+</script>
+</body>
+</html>
